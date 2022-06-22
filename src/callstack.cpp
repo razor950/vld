@@ -537,13 +537,32 @@ UINT CallStack::isCrtStartupFunction( LPCWSTR functionName ) const
         || (wcscmp(functionName, L"_Getctype") == 0)
         || (wcscmp(functionName, L"std::_Facet_Register") == 0)
         || endWith(functionName, len, L">::_Getcat")
+        || endWith(functionName, len, L"initterm")
         ) {
         return CALLSTACK_STATUS_STARTUPCRT;
     }
 
     if (endWith(functionName, len, L"DllMainCRTStartup")
         || endWith(functionName, len, L"mainCRTStartup")
-        || beginWith(functionName, len, L"`dynamic initializer for '")) {
+
+        // NOTE: This is tricky...
+        //   This happens for c++ static initialization
+        //   In some cases, we will see
+        //       "namespace::`dynamic initializer for 'symbol'"
+        //   In other cases, there is no namespace prepended, even if the symbol is in a namespace:
+        //       "`dynamic initializer for 'namespace::symbol'"
+        // This happens above initterm in the stack, which means these statics can be ignored by the code above if they have the namespace
+
+        // Ideally, we would ignore dynamic initializers if we (somehow) know there is also a matching "`dynamic atexit destructor for 'symbol'"
+        // It's possible to use some kind of heuristic to detect this (the stack will have ..., classname::classname, dynamic initializer for, initterm, ...)
+        // That means that the caller really needs a state machine as we are doing some context-sensitive parsing
+
+        // For now, we just make the (possibly wrong) assumption that all dynamic initializations will be cleaned up
+        // Therefore, the following line is commented out.
+        //     Clearly wrong when we have a global written as "static void* foo = malloc(1);"
+        //     But we can look at a more complex fix if we need to handle that
+        //|| beginWith(functionName, len, L"`dynamic initializer for '")
+        ) {
         // When we reach this point there is no reason going further down the stack
         return CALLSTACK_STATUS_NOTSTARTUPCRT;
     }

@@ -37,9 +37,9 @@ extern VisualLeakDetector g_vld;
 
 extern "C" {
 
-__declspec(dllexport) void VLDDisable ()
+__declspec(dllexport) bool VLDDisable ()
 {
-    g_vld.DisableLeakDetection();
+    return g_vld.DisableLeakDetection();
 }
 
 __declspec(dllexport) void VLDEnable ()

@@ -128,7 +128,7 @@ struct moduleentry_t
 VOID DumpMemoryA (LPCVOID address, SIZE_T length);
 VOID DumpMemoryW (LPCVOID address, SIZE_T length);
 BOOL FindImport (HMODULE importmodule, HMODULE exportmodule, LPCSTR exportmodulename, LPCSTR importname);
-BOOL FindPatch (HMODULE importmodule, LPCSTR exportmodulename, LPCVOID replacement);
+BOOL FindPatch (HMODULE importmodule, moduleentry_t* module);
 VOID InsertReportDelay ();
 BOOL IsModulePatched (HMODULE importmodule, moduleentry_t patchtable [], UINT tablesize);
 BOOL PatchImport (HMODULE importmodule, moduleentry_t *module);
@@ -150,10 +150,6 @@ VOID SetReportEncoding (encoding_e encoding);
 VOID SetReportFile (FILE *file, BOOL copydebugger, BOOL copytostdout);
 LPWSTR AppendString (LPWSTR dest, LPCWSTR source);
 BOOL StrToBool (LPCWSTR s);
-#if _WIN32_WINNT < 0x0600 // Windows XP or earlier, no GetProcessIdOfThread()
-DWORD _GetProcessIdOfThread (HANDLE thread);
-#define GetProcessIdOfThread _GetProcessIdOfThread
-#endif
 void ConvertModulePathToAscii( LPCWSTR modulename, LPSTR * modulenamea );
 DWORD CalculateCRC32(UINT_PTR p, UINT startValue = 0xD202EF8D);
 // Formats a message string using the specified message and variable

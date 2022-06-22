@@ -425,36 +425,176 @@ BOOL IsModulePatched (HMODULE importmodule, moduleentry_t patchtable [], UINT ta
     return FALSE;
 }
 
+
+#define MAX_PAGES_PROTECT 2
+
+typedef struct PROTECT_INSTANCE_TAG
+{
+    DWORD old_protect[MAX_PAGES_PROTECT];
+    LPVOID address;
+    SIZE_T size;
+} PROTECT_INSTANCE;
+
+typedef struct PROTECT_INSTANCE_TAG* PROTECT_HANDLE;
+
+#ifdef _WIN64
+#define PAGE_MASK 0xFFFFFFFFFFFFF000
+#else
+#define PAGE_MASK 0xFFFFF000
+#endif
+
+#define PAGE_SIZE 0x1000
+
+static BOOL VLDVirtualProtect(PROTECT_HANDLE protect_handle, LPVOID address, SIZE_T size, DWORD protect)
+{
+    BOOL result = TRUE;
+    size_t page_count = 0;
+
+    // save the address and size so that we can restore in the same way
+    protect_handle->address = address;
+    protect_handle->size = size;
+
+    uintptr_t current_address = (uintptr_t)address;
+
+    // walk all pages while we still have size > 0
+    while ((size > 0) && (page_count < MAX_PAGES_PROTECT))
+    {
+        uintptr_t page_address = current_address & PAGE_MASK;
+        SIZE_T size_in_page = page_address + PAGE_SIZE - current_address;
+        SIZE_T size_to_protect = (size_in_page < size) ? size_in_page : size;
+
+        result = VirtualProtect((LPVOID)current_address, size_to_protect, protect, &protect_handle->old_protect[page_count]);
+        if (!result)
+        {
+            Report(L"%zu: !!! VirtualProtect FAILED when protecting for address=%p, size=%zu, with GetLastError()=%lu, protect_handle->address=%p, protect_handle->size=%zu",
+                __LINE__, current_address, size_to_protect,
+                GetLastError(),
+                protect_handle->address, protect_handle->size);
+        }
+        page_count++;
+        current_address += size_to_protect;
+        size -= size_to_protect;
+    }
+
+    return result;
+}
+
+static void VLDVirtualRestore(PROTECT_HANDLE protect_handle)
+{
+    size_t page_count = 0;
+    SIZE_T size = protect_handle->size;
+    uintptr_t current_address = (uintptr_t)protect_handle->address;
+
+    // walk all pages while we still have size > 0
+    while ((size > 0) && (page_count < MAX_PAGES_PROTECT))
+    {
+        uintptr_t page_address = current_address & PAGE_MASK;
+        SIZE_T size_in_page = page_address + PAGE_SIZE - current_address;
+        SIZE_T size_to_protect = (size_in_page < size) ? size_in_page : size;
+
+        DWORD dont_care;
+        if (!VirtualProtect((LPVOID)current_address, size_to_protect, protect_handle->old_protect[page_count], &dont_care))
+        {
+            static volatile DWORD lastError = GetLastError();
+            Report(L"%zu: !!! VirtualProtect FAILED when restoring for address=%p, size=%zu, with GetLastError()=%lu, protect_handle->old_protect[page_count]=%lu, protect_handle->address=%p, protect_handle->size=%zu",
+                __LINE__, current_address, size_to_protect,
+                GetLastError(), protect_handle->old_protect[page_count],
+                protect_handle->address, protect_handle->size);
+            abort();
+        }
+
+        page_count++;
+        current_address += size_to_protect;
+        size -= size_to_protect;
+    }
+
+}
+
 LPVOID FindRealCode(LPVOID pCode)
 {
-    LPVOID result = pCode;
+    LPVOID result;
     if (pCode != NULL)
     {
-        if (*(WORD *)pCode == 0x25ff) // JMP r/m32
+        // we need to make sure we can read the first 7 ULONG_PTRs
+        PROTECT_INSTANCE protect_1;
+
+        if (VLDVirtualProtect(&protect_1, pCode, sizeof(ULONG_PTR) * 7, PAGE_EXECUTE_READ))
         {
+            if (*(WORD*)pCode == 0x25ff) // JMP r/m32
+            {
 #ifdef _WIN64
-            LONG offset = *((LONG *)((ULONG_PTR)pCode + 2));
-            // RIP relative addressing
-            PBYTE pNextInst = (PBYTE)((ULONG_PTR)pCode + 6);
-            pCode = *(LPVOID*)(pNextInst + offset);
-            return pCode;
+                LONG offset = *((LONG*)((ULONG_PTR)pCode + 2));
+                // RIP relative addressing
+                PBYTE pNextInst = (PBYTE)((ULONG_PTR)pCode + 6);
+
+                // now that we got the offset, make sure we can read the code at the offset
+                PROTECT_INSTANCE protect_2;
+                PBYTE addr = pNextInst + offset;
+
+                if (VLDVirtualProtect(&protect_2, (LPVOID*)addr, sizeof(LPVOID), PAGE_EXECUTE_READ))
+                {
+                    pCode = *(LPVOID*)(addr);
+                    result = FindRealCode(pCode);
+                    VLDVirtualRestore(&protect_2);
+                }
+                else
+                {
+                    result = NULL;
+                }
 #else
-            DWORD addr = *((DWORD *)((ULONG_PTR)pCode + 2));
-            pCode = *(LPVOID*)(addr);
-            return FindRealCode(pCode);
+                DWORD addr = *((DWORD*)((ULONG_PTR)pCode + 2));
+                // now that we got the address to read, make sure we can read the code at the offset
+                PROTECT_INSTANCE protect_2;
+                if (VLDVirtualProtect(&protect_2, (LPVOID)addr, sizeof(LPVOID), PAGE_EXECUTE_READ))
+                {
+                    pCode = *(LPVOID*)(addr);
+                    result = FindRealCode(pCode);
+                    VLDVirtualRestore(&protect_2);
+                }
+                else
+                {
+                    result = NULL;
+                }
 #endif
+            }
+            else if (*(BYTE*)pCode == 0xE9) // JMP rel32
+            {
+                // Relative next instruction
+                PROTECT_INSTANCE protect_2;
+                PBYTE pNextInst = (PBYTE)((ULONG_PTR)pCode + 5);
+                LONG offset = *((LONG*)((ULONG_PTR)pCode + 1));
+                if (VLDVirtualProtect(&protect_2, pNextInst + offset, sizeof(LPVOID), PAGE_EXECUTE_READ))
+                {
+                    pCode = (LPVOID*)(pNextInst + offset);
+                    result = FindRealCode(pCode);
+                    VLDVirtualRestore(&protect_2);
+                }
+                else
+                {
+                    result = NULL;
+                }
+            }
+            else
+            {
+                result = pCode;
+            }
+
+            // restore the page protection state
+            VLDVirtualRestore(&protect_1);
         }
-        if (*(BYTE *)pCode == 0xE9) // JMP rel32
+        else
         {
-            // Relative next instruction
-            PBYTE	pNextInst = (PBYTE)((ULONG_PTR)pCode + 5);
-            LONG	offset = *((LONG *)((ULONG_PTR)pCode + 1));
-            pCode = (LPVOID*)(pNextInst + offset);
-            return FindRealCode(pCode);
+            result = NULL;
         }
+    }
+    else
+    {
+        result = NULL;
     }
     return result;
 }
+
+#define MAX_PATCH_ENTRY_COUNT 128
 
 // PatchImport - Patches all future calls to an imported function, or references
 //   to an imported variable, through to a replacement function or variable.
@@ -517,104 +657,131 @@ BOOL PatchImport (HMODULE importmodule, moduleentry_t *patchModule)
 	DWORD dwLength = ::GetModuleFileNameA(importmodule, pszBuffer, dwMaxChars);
 #endif
 
+    // have a stack local array of the addresses, don't want to use malloc for this
+    // The reason to precompute and cache these is because VirtualProtect is expensive
+    // Thus first we compute *only* once the real addresses for the export module
+    LPVOID realAddresses[MAX_PATCH_ENTRY_COUNT];
+    patchentry_t* patchEntry = patchModule->patchTable;
+    int i = 0;
+    while (patchEntry->importName)
+    {
+        LPCSTR importname = patchEntry->importName;
+
+        // Get the *real* address of the import. If we find this address in the IAT,
+        // then we've found the entry that needs to be patched.
+        LPVOID import = VisualLeakDetector::_RGetProcAddress(exportmodule, importname);
+        if (!import)
+            import = GetProcAddress(exportmodule, importname);
+        import = FindRealCode(import);
+
+        realAddresses[i] = import;
+
+        patchEntry++;
+        i++;
+
+        if (i >= MAX_PATCH_ENTRY_COUNT)
+        {
+            // we only process MAX_PATCH_ENTRY_COUNT, if we exceed it crash
+            // if this abort is ever hit, it means that MAX_PATCH_ENTRY_COUNT should be bumped up
+            Report(L"MAX_PATCH_ENTRY_COUNT is set to %zu, but has been exceeded, MAX_PATCH_ENTRY_COUNT needs to be increased.\n", MAX_PATCH_ENTRY_COUNT);
+            abort();
+            break;
+        }
+    }
+
     int result = 0;
     while (idte->FirstThunk != 0x0) {
         PCHAR importdllname = (PCHAR)R2VA(importmodule, idte->Name);
         UNREFERENCED_PARAMETER(importdllname);
+        HMODULE importdllbaseaddress = GetModuleHandleA(importdllname);
+        UNREFERENCED_PARAMETER(importdllbaseaddress);
 
-        patchentry_t *patchEntry = patchModule->patchTable;
-        int i = 0;
-        while(patchEntry->importName)
+        // Locate the import's IAT entry.
+        IMAGE_THUNK_DATA *thunk = (IMAGE_THUNK_DATA*)R2VA(importmodule, idte->FirstThunk);
+        IMAGE_THUNK_DATA *origThunk = (IMAGE_THUNK_DATA*)R2VA(importmodule, idte->OriginalFirstThunk);
+        for (; origThunk->u1.Function != NULL;
+            origThunk++, thunk++)
         {
-            LPCSTR importname   = patchEntry->importName;
-            LPCVOID replacement = patchEntry->replacement;
+            LPVOID func = FindRealCode((LPVOID)thunk->u1.Function);
 
-            // Get the *real* address of the import. If we find this address in the IAT,
-            // then we've found the entry that needs to be patched.
-            LPVOID import = VisualLeakDetector::_RGetProcAddress(exportmodule, importname);
-            if ( !import)
-                import = GetProcAddress(exportmodule, importname);
-            import = FindRealCode(import);
-
-            if (import == NULL) // Perhaps the named export module does not actually export the named import?
+            patchEntry = patchModule->patchTable;
+            i = 0;
+            while (patchEntry->importName)
             {
-                patchEntry++; i++;
-                continue;
-            }
-
-            // Locate the import's IAT entry.
-            IMAGE_THUNK_DATA *thunk = (IMAGE_THUNK_DATA*)R2VA(importmodule, idte->FirstThunk);
-            IMAGE_THUNK_DATA *origThunk = (IMAGE_THUNK_DATA*)R2VA(importmodule, idte->OriginalFirstThunk);
-            for (; origThunk->u1.Function != NULL;
-                origThunk++, thunk++)
-            {
-                LPVOID func = FindRealCode((LPVOID)thunk->u1.Function);
-                if (((DWORD_PTR)func == (DWORD_PTR)import))
+                LPVOID import = realAddresses[i];
+                if (import != NULL)
                 {
-                    // Found the IAT entry. Overwrite the address stored in the IAT
-                    // entry with the address of the replacement. Note that the IAT
-                    // entry may be write-protected, so we must first ensure that it is
-                    // writable.
-                    if (import != replacement)
-                    {
-                        if (patchEntry->original != NULL)
-                            *patchEntry->original = func;
+                    LPCVOID replacement = patchEntry->replacement;
 
-                        DWORD protect;
-                        if (VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_EXECUTE_READWRITE, &protect)) {
-                            thunk->u1.Function = (DWORD_PTR)replacement;
-                            if (VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), protect, &protect)) {
+                    if (((DWORD_PTR)func == (DWORD_PTR)import))
+                    {
+                        // Found the IAT entry. Overwrite the address stored in the IAT
+                        // entry with the address of the replacement. Note that the IAT
+                        // entry may be write-protected, so we must first ensure that it is
+                        // writable.
+                        if (import != replacement)
+                        {
+                            if (patchEntry->original != NULL)
+                                *patchEntry->original = func;
+
+                            DWORD protect;
+                            if (VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_EXECUTE_READWRITE, &protect)) {
+                                thunk->u1.Function = (DWORD_PTR)replacement;
+                                if (VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), protect, &protect)) {
 #ifdef PRINTHOOKINFO
-                                if (!IS_ORDINAL(importname)) {
-                                    DbgReport(L"Hook dll \"%S\" import %S!%S()\n",
-                                        strrchr(pszBuffer, '\\') + 1, patchModule->exportModuleName, importname);
-                                } else {
-                                    DbgReport(L"Hook dll \"%S\" import %S!%Iu()\n",
-                                        strrchr(pszBuffer, '\\') + 1, patchModule->exportModuleName, importname);
-                                }
+                                    if (!IS_ORDINAL(importname)) {
+                                        DbgReport(L"Hook dll \"%S\" import %S!%S()\n",
+                                            strrchr(pszBuffer, '\\') + 1, patchModule->exportModuleName, importname);
+                                    }
+                                    else {
+                                        DbgReport(L"Hook dll \"%S\" import %S!%zu()\n",
+                                            strrchr(pszBuffer, '\\') + 1, patchModule->exportModuleName, importname);
+                                    }
 #endif
+                                }
                             }
                         }
+                        // The patch has been installed in the import module.
+                        result++;
+                        break;
                     }
-                    // The patch has been installed in the import module.
-                    result++;
-                    break;
-                }
 #ifdef PRINTHOOKINFO
-                PIMAGE_IMPORT_BY_NAME funcEntry = (PIMAGE_IMPORT_BY_NAME)
-                    R2VA(importmodule, origThunk->u1.AddressOfData);
-                if (stricmp(importdllname, patchModule->exportModuleName) == 0)
-                {
-                    if (!(origThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) && !IS_ORDINAL(importname) &&
-                        strcmp(reinterpret_cast<const char*>(funcEntry->Name), importname) == 0)
+                    PIMAGE_IMPORT_BY_NAME funcEntry = (PIMAGE_IMPORT_BY_NAME)
+                        R2VA(importmodule, origThunk->u1.AddressOfData);
+                    if (stricmp(importdllname, patchModule->exportModuleName) == 0)
                     {
-                        if (!dllNamePrinted)
+                        if (!(origThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) && !IS_ORDINAL(importname) &&
+                            strcmp(reinterpret_cast<const char*>(funcEntry->Name), importname) == 0)
                         {
-                            dllNamePrinted = true;
-                            DbgReport(L"Hook dll \"%S\":\n",
-                                strrchr(pszBuffer, '\\') + 1);
+                            if (!dllNamePrinted)
+                            {
+                                dllNamePrinted = true;
+                                DbgReport(L"Hook dll \"%S\":\n",
+                                    strrchr(pszBuffer, '\\') + 1);
+                            }
+                            DbgReport(L"Import found %S(\"%S\") for dll \"%S\".\n",
+                                importname, patchModule->exportModuleName, importdllname);
+                            break;
                         }
-                        DbgReport(L"Import found %S(\"%S\") for dll \"%S\".\n",
-                            importname, patchModule->exportModuleName, importdllname);
-                        break;
-                    }
-                    if ((origThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) && IS_ORDINAL(importname) &&
-                        (IMAGE_ORDINAL(origThunk->u1.Ordinal) == (UINT_PTR)importname))
-                    {
-                        if (!dllNamePrinted)
+                        if ((origThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) && IS_ORDINAL(importname) &&
+                            (IMAGE_ORDINAL(origThunk->u1.Ordinal) == (UINT_PTR)importname))
                         {
-                            dllNamePrinted = true;
-                            DbgReport(L"Hook dll \"%S\":\n",
-                                strrchr(pszBuffer, '\\') + 1);
+                            if (!dllNamePrinted)
+                            {
+                                dllNamePrinted = true;
+                                DbgReport(L"Hook dll \"%S\":\n",
+                                    strrchr(pszBuffer, '\\') + 1);
+                            }
+                            DbgReport(L"Import found %zu(\"%S\") for dll \"%S\".\n",
+                                importname, patchModule->exportModuleName, importdllname);
+                            break;
                         }
-                        DbgReport(L"Import found %Iu(\"%S\") for dll \"%S\".\n",
-                            importname, patchModule->exportModuleName, importdllname);
-                        break;
                     }
-                }
 #endif
+                }
+
+                patchEntry++; i++;
             }
-            patchEntry++; i++;
         }
 
         idte++;
@@ -1025,64 +1192,6 @@ BOOL StrToBool (LPCWSTR s) {
     }
 }
 
-// _GetProcessIdOfThread - Returns the ID of the process owns the thread.
-//
-//  - thread (IN): The handle to the thread.
-//
-//  Return Value:
-//
-//    Returns the ID of the process that owns the thread. Otherwise returns 0.
-//
-DWORD _GetProcessIdOfThread (HANDLE thread)
-{
-    typedef struct _CLIENT_ID {
-        HANDLE UniqueProcess;
-        HANDLE UniqueThread;
-    } CLIENT_ID, *PCLIENT_ID;
-
-    typedef LONG NTSTATUS;
-    typedef LONG KPRIORITY;
-
-    typedef struct _THREAD_BASIC_INFORMATION {
-        NTSTATUS  ExitStatus;
-        PVOID     TebBaseAddress;
-        CLIENT_ID ClientId;
-        KAFFINITY AffinityMask;
-        KPRIORITY Priority;
-        KPRIORITY BasePriority;
-    } THREAD_BASIC_INFORMATION, *PTHREAD_BASIC_INFORMATION;
-
-    const static THREADINFOCLASS ThreadBasicInformation = (THREADINFOCLASS)0;
-
-    typedef NTSTATUS (WINAPI *PNtQueryInformationThread) (HANDLE thread,
-        THREADINFOCLASS infoclass, PVOID buffer, ULONG buffersize,
-        PULONG used);
-
-    static PNtQueryInformationThread NtQueryInformationThread = NULL;
-
-    THREAD_BASIC_INFORMATION tbi;
-    NTSTATUS status;
-    if (NtQueryInformationThread == NULL) {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        if (ntdll)
-        {
-            NtQueryInformationThread = (PNtQueryInformationThread)GetProcAddress(ntdll, "NtQueryInformationThread");
-        }
-
-        if (NtQueryInformationThread == NULL) {
-            return 0;
-        }
-    }
-
-    status = NtQueryInformationThread(thread, ThreadBasicInformation, &tbi, sizeof(tbi), NULL);
-    if(status < 0) {
-        // Shall we go through all the trouble of setting last error?
-        return 0;
-    }
-
-    return (DWORD)tbi.ClientId.UniqueProcess;
-}
-
 static const DWORD crctab[256] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
     0xe963a535, 0x9e6495a3, 0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988,
@@ -1172,14 +1281,22 @@ void GetFormattedMessage(DWORD last_error)
 //
 //    Module handle.
 //
-HMODULE GetCallingModule( UINT_PTR pCaller )
+HMODULE GetCallingModule(UINT_PTR pCaller )
 {
     HMODULE hModule = NULL;
-    MEMORY_BASIC_INFORMATION mbi;
-    if ( VirtualQuery((LPCVOID)pCaller, &mbi, sizeof(MEMORY_BASIC_INFORMATION)) == sizeof(MEMORY_BASIC_INFORMATION) )
+
+    /*MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((LPCVOID)pCaller, &mbi, sizeof(MEMORY_BASIC_INFORMATION)) == sizeof(MEMORY_BASIC_INFORMATION))
     {
         // the allocation base is the beginning of a PE file
-        hModule = (HMODULE) mbi.AllocationBase;
+        hModule = (HMODULE)mbi.AllocationBase;
+    }*/
+
+    WIN32_MEMORY_REGION_INFORMATION memoryRegionInfo;
+    if ( QueryVirtualMemoryInformation(GetCurrentProcess(), (LPCVOID)pCaller, MemoryRegionInfo, &memoryRegionInfo, sizeof(memoryRegionInfo), NULL) )
+    {
+        // the allocation base is the beginning of a PE file
+        hModule = (HMODULE)memoryRegionInfo.AllocationBase;
     }
     return hModule;
 }

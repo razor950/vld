@@ -1,20 +1,31 @@
-Visual Leak Detector (VLD) Version 2.5.2
+Visual Leak Detector (VLD) Version 2.5.3
 
 
   Change Log / Release Notes
+
+2.5.3 (22 June 2022)
+----------------------------
+  Enhancements:
+  + Call QueryVirtualMemoryInformation instead of VirtualQuery to improve performance
+
+  Bugs Fixed:
+  + Changed cmake file to output vld DLL with expected name extension
+  + Changed VLDDisable to report if VLD was enabled on this thread prior to the call
+  + Added missing .manifest file 
+  + Fix AV in FindRealCode due to incorrect restore of page protection flags
 
 2.5.2 (19 August 2020)
 ----------------------------
   Enhancements:
   + VS2017/2019 support added.
   + the log file is now opened in shared read mode which allows in-progress peeks of the file content
-
+ 
   Bug Fixes:
-    + notify report writer after closing report file 
-    + %zu is a valid format specifier only from vs2015 onwards 
-    + fix against a deadlock during logfile close
-    + fix for a use after delete of logfile FILE pointer
-    + fix: obtain ldrlock before dumping leaks, to avoid deadlocks
+  + notify report writer after closing report file 
+  + %zu is a valid format specifier only from vs2015 onwards 
+  + fix against a deadlock during logfile close
+  + fix for a use after delete of logfile FILE pointer
+  + fix: obtain ldrlock before dumping leaks, to avoid deadlocks
 
 2.5.1 (30 January 2017)
 ----------------------------

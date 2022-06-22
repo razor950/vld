@@ -56,7 +56,7 @@
 #endif
 
 // The Visual Leak Detector APIs.
-extern "C" __declspec(dllexport) void VLDDisable ();
+extern "C" __declspec(dllexport) bool VLDDisable ();
 extern "C" __declspec(dllexport) void VLDEnable ();
 extern "C" __declspec(dllexport) void VLDRestore ();
 
@@ -252,7 +252,7 @@ public:
     LPVOID  __stdcall Realloc (_In_opt_ LPVOID mem, _In_ SIZE_T size);
     ULONG   __stdcall Release ();
 
-    void DisableLeakDetection ();
+    bool DisableLeakDetection (); // returns true, if leak detection was enabled
     void EnableLeakDetection ();
     void RestoreLeakDetectionState ();
     void GlobalDisableLeakDetection ();

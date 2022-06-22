@@ -21,3 +21,4 @@ src/bin/vld.ini
 *.VC.opendb
 *.VC.db
 build/
+cmake-bin/

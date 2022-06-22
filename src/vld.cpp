@@ -330,7 +330,6 @@ bool IsWindows7OrGreater()
     return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_WIN7), LOBYTE(_WIN32_WINNT_WIN7), 0);
 }
 
-#define _WIN32_WINNT_WIN8 0x0602
 bool IsWindows8OrGreater()
 {
     return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_WIN8), LOBYTE(_WIN32_WINNT_WIN8), 0);
@@ -978,7 +977,7 @@ LPWSTR VisualLeakDetector::buildSymbolSearchPath ()
 #error Not supported VS
 #endif
     // Append Visual Studio 2019/2017/2015/2013/2012/2010/2008 symbols cache directory.
-    for (UINT n = 9; n <= 14; ++n) {
+    for (UINT n = 9; n <= 16; ++n) {
         WCHAR debuggerpath[MAX_PATH] = { 0 };
         swprintf(debuggerpath, _countof(debuggerpath), L"Software\\Microsoft\\VisualStudio\\%u.0\\Debugger", n);
         HKEY debuggerkey;
@@ -2519,13 +2518,13 @@ void VisualLeakDetector::DisableModule(HMODULE module)
     ChangeModuleState(module,false);
 }
 
-void VisualLeakDetector::DisableLeakDetection ()
+bool VisualLeakDetector::DisableLeakDetection ()
 {
     tls_t *tls;
 
     if (m_options & VLD_OPT_VLDOFF) {
         // VLD has been turned off.
-        return;
+        return false;
     }
 
     // Disable memory leak detection for the current thread. There are two flags
@@ -2536,6 +2535,8 @@ void VisualLeakDetector::DisableLeakDetection ()
     tls->oldFlags = tls->flags;
     tls->flags &= ~VLD_TLS_ENABLED;
     tls->flags |= VLD_TLS_DISABLED;
+
+    return (tls->oldFlags & VLD_TLS_ENABLED) == VLD_TLS_ENABLED;
 }
 
 void VisualLeakDetector::EnableLeakDetection ()

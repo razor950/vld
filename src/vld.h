@@ -70,9 +70,9 @@ extern "C" {
 //
 //  Return Value:
 //
-//    None.
+//    bool, returns true, if VLD was previously enabled (on this thread)
 //
-__declspec(dllimport) void VLDDisable ();
+__declspec(dllimport) bool VLDDisable ();
 
 // VLDEnable - Enables Visual Leak Detector's memory leak detection at runtime.
 //   If memory leak detection is already enabled, which it is by default, then

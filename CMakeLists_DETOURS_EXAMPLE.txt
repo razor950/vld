@@ -1,0 +1,227 @@
+# Example CMakeLists.txt modifications to add Detours support to VLD
+#
+# Copy these sections into your existing CMakeLists.txt
+
+# =============================================================================
+# SECTION 1: Add Detours to module search path
+# =============================================================================
+# Add this near the top of your CMakeLists.txt, after project()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# =============================================================================
+# SECTION 2: Find Detours package
+# =============================================================================
+# Add this in the dependencies section
+
+# Option to use Detours instead of manual binary patching
+option(VLD_USE_DETOURS "Use Microsoft Detours for hooking instead of manual patching" ON)
+
+if(VLD_USE_DETOURS)
+    find_package(Detours REQUIRED)
+
+    if(Detours_FOUND)
+        message(STATUS "VLD: Using Microsoft Detours for binary hooking")
+        message(STATUS "  Detours include: ${Detours_INCLUDE_DIRS}")
+        message(STATUS "  Detours library: ${Detours_LIBRARIES}")
+    else()
+        message(FATAL_ERROR "Detours not found. Please install via vcpkg or set DETOURS_ROOT")
+    endif()
+else()
+    message(STATUS "VLD: Using manual binary patching (legacy mode)")
+endif()
+
+# =============================================================================
+# SECTION 3: Configure VLD sources based on Detours option
+# =============================================================================
+# Add this where you define VLD sources
+
+set(VLD_SOURCES
+    src/callstack.cpp
+    src/crtmfcpatch.cpp
+    src/utility.cpp
+    src/vldheap.cpp
+    # ... other existing sources ...
+)
+
+# Choose implementation based on VLD_USE_DETOURS option
+if(VLD_USE_DETOURS)
+    list(APPEND VLD_SOURCES
+        src/vld_detours_integration.cpp  # Detours-based implementation
+    )
+    # Remove or exclude the old manual patching code from vld.cpp
+    # You can either:
+    # 1. Use preprocessor defines to exclude old code
+    # 2. Move old code to separate file and conditionally include it
+else()
+    list(APPEND VLD_SOURCES
+        src/vld.cpp  # Original implementation with manual patching
+    )
+endif()
+
+# =============================================================================
+# SECTION 4: Link Detours to VLD target
+# =============================================================================
+# Add this in the target configuration section
+
+add_library(vld SHARED ${VLD_SOURCES})
+
+# Link Detours if enabled
+if(VLD_USE_DETOURS)
+    target_link_libraries(vld
+        PRIVATE
+        Detours::Detours
+        psapi  # Required for GetModuleInformation
+    )
+
+    target_compile_definitions(vld
+        PRIVATE
+        VLD_USE_DETOURS=1
+    )
+endif()
+
+# Other VLD dependencies
+target_link_libraries(vld
+    PRIVATE
+    dbghelp
+    # ... other libraries ...
+)
+
+# =============================================================================
+# SECTION 5: Installation instructions for Detours
+# =============================================================================
+# Add this as a custom target to help developers set up Detours
+
+add_custom_target(install_detours
+    COMMAND ${CMAKE_COMMAND} -E echo "Installing Detours via vcpkg..."
+    COMMAND ${CMAKE_COMMAND} -E echo "Run: vcpkg install detours:x64-windows detours:x86-windows"
+    COMMAND ${CMAKE_COMMAND} -E echo "Or download from: https://github.com/microsoft/Detours"
+    VERBATIM
+)
+
+# =============================================================================
+# SECTION 6: Testing both implementations
+# =============================================================================
+# Optional: Build both versions for comparison
+
+option(VLD_BUILD_BOTH_IMPLEMENTATIONS "Build both Detours and manual patching versions" OFF)
+
+if(VLD_BUILD_BOTH_IMPLEMENTATIONS)
+    # Build manual patching version
+    add_library(vld_manual SHARED
+        src/vld.cpp
+        # ... other sources ...
+    )
+
+    # Build Detours version
+    add_library(vld_detours SHARED
+        src/vld_detours_integration.cpp
+        # ... other sources ...
+    )
+    target_link_libraries(vld_detours PRIVATE Detours::Detours psapi)
+    target_compile_definitions(vld_detours PRIVATE VLD_USE_DETOURS=1)
+
+    # Tests can compare both implementations
+    add_test(NAME compare_implementations
+        COMMAND ${CMAKE_COMMAND} -E echo "Run tests with both vld_manual.dll and vld_detours.dll"
+    )
+endif()
+
+# =============================================================================
+# COMPLETE EXAMPLE: Full CMakeLists.txt snippet
+# =============================================================================
+
+# Minimal complete example:
+cmake_minimum_required(VERSION 3.10)
+project(VLD)
+
+# Add cmake module path
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Option to use Detours
+option(VLD_USE_DETOURS "Use Microsoft Detours for hooking" ON)
+
+# Find Detours
+if(VLD_USE_DETOURS)
+    find_package(Detours REQUIRED)
+endif()
+
+# Define VLD library
+add_library(vld SHARED
+    src/callstack.cpp
+    src/crtmfcpatch.cpp
+    src/utility.cpp
+    src/vldheap.cpp
+    src/vldint.cpp
+    # Choose implementation:
+    $<$<BOOL:${VLD_USE_DETOURS}>:src/vld_detours_integration.cpp>
+    $<$<NOT:$<BOOL:${VLD_USE_DETOURS}>>:src/vld.cpp>
+)
+
+# Link libraries
+target_link_libraries(vld
+    PRIVATE
+    dbghelp
+    $<$<BOOL:${VLD_USE_DETOURS}>:Detours::Detours>
+    $<$<BOOL:${VLD_USE_DETOURS}>:psapi>
+)
+
+# Compile definitions
+target_compile_definitions(vld
+    PRIVATE
+    VLDBUILD
+    $<$<BOOL:${VLD_USE_DETOURS}>:VLD_USE_DETOURS=1>
+)
+
+# Installation
+install(TARGETS vld
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+
+install(FILES src/vld.h
+    DESTINATION include
+)
+
+# =============================================================================
+# ALTERNATIVE: Using FetchContent to download Detours automatically
+# =============================================================================
+
+include(FetchContent)
+
+if(VLD_USE_DETOURS)
+    FetchContent_Declare(
+        Detours
+        GIT_REPOSITORY https://github.com/microsoft/Detours.git
+        GIT_TAG 4b8c659  # or use a specific tag like "v4.0.1"
+    )
+
+    FetchContent_MakeAvailable(Detours)
+
+    # Detours doesn't provide CMake by default, so you might need to build it manually
+    # or use a wrapper CMakeLists.txt for it
+endif()
+
+# =============================================================================
+# BUILD INSTRUCTIONS
+# =============================================================================
+
+# To build with Detours (recommended):
+#   mkdir build
+#   cd build
+#   cmake .. -DVLD_USE_DETOURS=ON
+#   cmake --build .
+
+# To build with manual patching (legacy):
+#   mkdir build
+#   cd build
+#   cmake .. -DVLD_USE_DETOURS=OFF
+#   cmake --build .
+
+# To specify Detours location:
+#   cmake .. -DVLD_USE_DETOURS=ON -DDETOURS_ROOT=/path/to/detours
+
+# Using vcpkg (easiest):
+#   vcpkg install detours
+#   cmake .. -DVLD_USE_DETOURS=ON -DCMAKE_TOOLCHAIN_FILE=[vcpkg root]/scripts/buildsystems/vcpkg.cmake
